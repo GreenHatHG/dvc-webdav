@@ -3,7 +3,7 @@ import shlex
 import subprocess
 import sys
 import threading
-from typing import Optional, Protocol, Union
+from typing import Optional, Union
 
 import httpx
 
@@ -70,44 +70,17 @@ def execute_command(command: Union[list[str], str], timeout: int = 10) -> str:
     return token
 
 
-class TokenSaver(Protocol):
-    """Protocol defining the token persistence interface"""
-
-    def __call__(self, token: Optional[str]) -> None: ...
-
-
-def safe_callback(
-    cb: Optional[TokenSaver], value: Optional[str], operation: str
-) -> None:
-    """Safely execute callback function with error handling"""
-    if not cb:
-        return
-
-    try:
-        cb(value)
-    except Exception as e:  # noqa: BLE001
-        _log_with_thread(
-            logging.WARNING,
-            "[BearerAuthClient] Failed to %s token: %s",
-            operation,
-            e,
-        )
-
-
 class BearerAuthClient(httpx.Client):
     """HTTPX client that adds Bearer token authentication using a command.
 
     Args:
         bearer_token_command: The command to run to get the Bearer token.
-        save_token_cb: Optional callback to persist the token.
-        token: Optional initial token to use.
         **kwargs: Additional arguments to pass to the httpx.Client constructor.
     """
 
     def __init__(
         self,
         bearer_token_command: str,
-        save_token_cb: Optional[TokenSaver] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -119,11 +92,10 @@ class BearerAuthClient(httpx.Client):
                 "[BearerAuthClient] bearer_token_command must be a non-empty string"
             )
         self.bearer_token_command = bearer_token_command
-        self.save_token_cb = save_token_cb
         self._token: Optional[str] = None
         self._lock = threading.Lock()
 
-    def _refresh_token_locked(self) -> None:
+    def _refresh_token(self) -> None:
         """Execute token command and update state."""
         _log_with_thread(
             logging.DEBUG, "[BearerAuthClient] Refreshing token via command..."
@@ -135,7 +107,6 @@ class BearerAuthClient(httpx.Client):
 
             self._token = new_token
             self.headers["Authorization"] = f"Bearer {new_token}"
-            safe_callback(self.save_token_cb, new_token, "save")
 
             _log_with_thread(
                 logging.DEBUG, "[BearerAuthClient] Token refreshed successfully."
@@ -143,8 +114,6 @@ class BearerAuthClient(httpx.Client):
         except Exception:
             # Clean up state on failure
             self._token = None
-            # Clear persisted token but don't fail the refresh operation
-            safe_callback(self.save_token_cb, None, "clear")
             raise
 
     def _ensure_token(self) -> None:
@@ -154,17 +123,7 @@ class BearerAuthClient(httpx.Client):
 
         with self._lock:
             if not self._token:
-                self._refresh_token_locked()
-
-    def update_token(self, token: Optional[str]) -> None:
-        """Update the token with a new one"""
-        if not token:
-            return
-
-        with self._lock:
-            if self._token != token:
-                self._token = token
-                self.headers["Authorization"] = f"Bearer {token}"
+                self._refresh_token()
 
     def request(self, *args, **kwargs) -> httpx.Response:
         """Wraps httpx.request with auto-refresh logic for 401 Unauthorized."""
@@ -183,7 +142,7 @@ class BearerAuthClient(httpx.Client):
             with self._lock:
                 current_auth_header = self.headers.get("Authorization")
                 if sent_auth_header == current_auth_header:
-                    self._refresh_token_locked()
+                    self._refresh_token()
                 else:
                     _log_with_thread(
                         logging.DEBUG,
