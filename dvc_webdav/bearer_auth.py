@@ -148,12 +148,6 @@ class BearerAuth(httpx.Auth):
                 logging.DEBUG, "[BearerAuth] Received 401. Attempting recovery."
             )
 
-            # Read response body to release connection
-            try:
-                response.read()
-            except Exception as e:  # noqa: BLE001
-                logger.debug("Error reading response body: %s", e)
-
             token = self._refresh_token_if_needed(failed_token=token)
             request.headers["Authorization"] = f"Bearer {token}"
             yield request
